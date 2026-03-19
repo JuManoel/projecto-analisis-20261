@@ -77,6 +77,7 @@ import numpy as np
 import pandas as pd
 import os
 import re
+import traceback
 from pathlib import Path
 
 
@@ -99,6 +100,7 @@ def ejecutar_con_tiempo(config_sistema, condiciones, alcance, mecanismo, resulta
             "particion": sia_dos.particion,
             "perdida": str(sia_dos.perdida).replace('.', ','),
             "tiempo": str(sia_dos.tiempo_ejecucion).replace('.', ','),
+            "error": None,
         })
 
     except Exception as e:
@@ -106,7 +108,23 @@ def ejecutar_con_tiempo(config_sistema, condiciones, alcance, mecanismo, resulta
             "particion": None,
             "perdida": None,
             "tiempo": None,
+            "error": f"{type(e).__name__}: {e}",
+            "traceback": traceback.format_exc(),
         })
+
+
+def extraer_subsistema(subsistema: str) -> tuple[str, str] | None:
+    """Extract alcance and mecanismo literals from strings like X_{t+1}|y_{t}."""
+    if not isinstance(subsistema, str) or "|" not in subsistema:
+        return None
+
+    partes = subsistema.split("|", maxsplit=1)
+    alcance_lit = "".join(re.findall(r"[A-Z]", partes[0]))
+    mecanismo_lit = "".join(re.findall(r"[A-Z]", partes[1]))
+
+    if not alcance_lit or not mecanismo_lit:
+        return None
+    return alcance_lit, mecanismo_lit
 
 def resolver_tpm_path(estado_inicio: str) -> Path:
     """Find TPM file in common project locations based on state size."""
@@ -157,10 +175,21 @@ def ejecutar_desde_excel(
     estado_inicio: str | None = None,
     condiciones: str | None = None,
 ):
-    df = pd.read_excel(ruta_excel, sheet_name=0, usecols="B", skiprows=3, names=["Subsistema"]) #! changed from sheet_name=8
-    filas = df["Subsistema"].dropna().tolist()
+    df = pd.read_excel(
+        ruta_excel,
+        sheet_name=0,
+        usecols="A",
+        skiprows=3,
+        names=["Subsistema"],
+    )
+    filas = df["Subsistema"].dropna().astype(str).tolist()
     filas = filas[inicio:inicio + cantidad]
     resultados = []
+
+    if not filas:
+        raise ValueError(
+            "No se encontraron filas de subsistemas en Excel (hoja 0, columna A, skiprows=3)."
+        )
 
     estado_inicio = estado_inicio or inferir_estado_inicial()
     condiciones = condiciones or ("1" * len(estado_inicio))
@@ -168,12 +197,14 @@ def ejecutar_desde_excel(
     tpm = np.genfromtxt(tpm_path, delimiter=",")
 
     for i, fila in enumerate(filas, start=inicio + 1):
-        partes = fila.split("|")
-        if len(partes) != 2:
+        subsistema = extraer_subsistema(fila)
+        if subsistema is None:
+            print(f"Iteracion {i} - Formato no valido, se omite: {fila}")
             continue
+        alcance_lit, mecanismo_lit = subsistema
 
-        alcance = convertir_a_binario(partes[0][:len(partes[0]) - 3], n_bits=len(estado_inicio))
-        mecanismo = convertir_a_binario(partes[1][:len(partes[1]) - 1], n_bits=len(estado_inicio))
+        alcance = convertir_a_binario(alcance_lit, n_bits=len(estado_inicio))
+        mecanismo = convertir_a_binario(mecanismo_lit, n_bits=len(estado_inicio))
         print(f"Iteración {i} - Alcance: {alcance}, Mecanismo: {mecanismo}")
 
         config_sistema = Manager(estado_inicial=estado_inicio)
@@ -188,13 +219,28 @@ def ejecutar_desde_excel(
             print(f"Iteración {i} - Tiempo límite alcanzado, terminando proceso...")
             proceso.terminate()
             proceso.join()
-            resultado = {"perdida": None, "tiempo": None, "particion": None}
+            resultado = {
+                "perdida": None,
+                "tiempo": None,
+                "particion": None,
+                "error": "timeout",
+            }
         else:
             resultado = (
                 resultado_queue.get()
                 if not resultado_queue.empty()
-                else {"perdida": None, "tiempo": None, "particion": None}
+                else {
+                    "perdida": None,
+                    "tiempo": None,
+                    "particion": None,
+                    "error": "resultado_vacio",
+                }
             )
+
+        if resultado.get("error"):
+            print(f"Iteración {i} - Error: {resultado['error']}")
+            if resultado.get("traceback"):
+                print(resultado["traceback"])
 
         resultados.append({
             "Iteración": i,
@@ -203,7 +249,12 @@ def ejecutar_desde_excel(
             "Partición": resultado["particion"],
             "Pérdida": resultado["perdida"],
             "Tiempo de ejecución (s)": resultado["tiempo"],
+            "Error": resultado.get("error"),
         })
+
+    if not resultados:
+        raise ValueError("No se pudo procesar ninguna fila valida del archivo de entrada.")
+
     df_resultados = pd.DataFrame(resultados)
     ruta_salida.parent.mkdir(parents=True, exist_ok=True)
     df_resultados.to_excel(ruta_salida, index=False)
