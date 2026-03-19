@@ -3,8 +3,7 @@
 Este repositorio contiene tres implementaciones principales para el analisis de MIP/IIT:
 
 1. `QNodes` (base clasica, antes referida como Proyecto-2025A)
-2. `GeoMIP/src/Method1_GPU_Accelerated`
-3. `GeoMIP/src/Method2_Dynamic_Programming_Reformulation`
+2. `GeoMIP/src/Method2_Dynamic_Programming_Reformulation`
 
 ## Requisitos
 
